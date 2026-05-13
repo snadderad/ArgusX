@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ArgusX/ArgusX.vcxproj" Id="5fdb172f-3345-41e7-9bb5-84aa17454701" />
+</Solution>
