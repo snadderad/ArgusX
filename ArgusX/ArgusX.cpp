@@ -6,7 +6,6 @@
 #include <string>
 #include <chrono>
 #include <iomanip>
-#include <windows.h>
 #include <thread>
 #include <mutex>
 #include <queue>
@@ -14,101 +13,75 @@
 #include <vector>
 #include <algorithm>
 
-
-#define BOLD    "\033[1m"
-#define RED     "\033[31m"
-#define GREEN   "\033[32m"
-#define YELLOW  "\033[33m"
-#define RESET   "\033[0m"
-
-void clearScreen() {
-    std::cout << "\033[2J\033[H";
-}
-
-void line() {
-    std::cout << "  ----------------------------------------\n";
-}
-
-void printBanner(const ScanConfig& cfg, const std::vector<int>& ports) {
-    std::vector<std::string> ascii = {
-        "                :::     :::::::::   ::::::::  :::    :::  ::::::::          :::    :::",
-        "             :+: :+:   :+:    :+: :+:    :+: :+:    :+: :+:    :+:         :+:    :+: ",
-        "           +:+   +:+  +:+    +:+ +:+        +:+    +:+ +:+                 +:+  +:+   ",
-        "         +#++:++#++: +#++:++#:  :#:        +#+    +:+ +#++:++#++           +#++:+     ",
-        "        +#+     +#+ +#+    +#+ +#+   +#+# +#+    +#+        +#+          +#+  +#+     ",
-        "       #+#     #+# #+#    #+# #+#    #+# #+#    #+# #+#    #+#         #+#    #+#     ",
-        "      ###     ### ###    ###  ########   ########   ########          ###    ###      ",
-        "                                                                                      ",
-        "                     Made by snadderad     |  v1.0                                    ",
-        "                     github.com/snadderad  |  3-2026                                  ",
-    };
-
-    std::cout << "\n";
-    animateBanner(ascii, 5, 15);
-    std::cout << "\n";
-
-    line();
-    std::cout << "  Target  : " << cfg.target << "\n";
-    std::cout << "  Ports   : " << ports.size() << "\n";
-    std::cout << "  Threads : " << cfg.threads << "\n";
-    std::cout << "  Timeout : " << cfg.timeout_ms << "ms\n";
-    std::cout << "  Banners : " << (cfg.grab_banner ? "yes" : "no") << "\n";
-    line();
-    std::cout << "\n";
-}
-
-void printUsage(const char* prog) {
-    std::cout << "\nUsage:\n";
-    std::cout << "  " << prog << " <host> -p <ports> [options]\n\n";
-    std::cout << "Port formats:\n";
-    std::cout << "  -p 80           single port\n";
-    std::cout << "  -p 1-1000       range\n";
-    std::cout << "  -p 22,80,443    list\n\n";
-    std::cout << "Options:\n";
-    std::cout << "  -t <ms>         timeout per port in ms (default: 500)\n";
-    std::cout << "  --threads <n>   number of threads (default: 100)\n";
-    std::cout << "  --banner        grab service banners\n";
-    std::cout << "  --hosts <n>     parallel host threads (default: 10)\n\n";
-    std::cout << "Examples:\n";
-    std::cout << "  " << prog << " 192.168.1.1 -p 1-1000\n";
-    std::cout << "  " << prog << " vigil -p 22,80,443 --banner\n";
-    std::cout << "  " << prog << " 10.0.0.1 -p 1-65535 --threads 200 -t 300\n\n";
-}
-
-void displayHit(const std::string& ip, const std::vector<PortResult>& results) {
-    std::cout << "  [ " << GREEN << ip << RESET << " ]\n";
-    std::cout << "  PORT     STATE   SERVICE    BANNER\n";
-    line();
-    for (const auto& r : results) {
-        std::cout << "  "
-            << GREEN << std::left << std::setw(8) << r.port << RESET
-            << std::setw(8) << "open"
-            << std::setw(11) << (r.service.empty() ? "unknown" : r.service)
-            << r.banner << "\n";
+// Parses an integer strictly: the whole token must be consumed, so junk like
+// "100abc" is rejected instead of silently truncating to 100.
+static bool safe_stoi(const std::string& s, int& out) {
+    if (s.empty()) return false;
+    try {
+        size_t pos = 0;
+        out = std::stoi(s, &pos);
+        return pos == s.size();
     }
-    std::cout << "\n";
+    catch (...) {
+        return false;
+    }
 }
 
 int main(int argc, char* argv[]) {
     enableANSI();
 
-    if (argc < 4) {
+    if (argc < 2) {
         printUsage(argv[0]);
         return 1;
     }
 
     ScanConfig cfg;
-    cfg.target = argv[1];
     std::string port_str;
     int host_threads = 10;
 
-    for (int i = 2; i < argc; i++) {
+    // If the first argument is a flag (starts with '-'), no target host was
+    // given -- fall back to auto-detecting the local subnet later on.
+    bool auto_target = (argv[1][0] == '-');
+    int arg_start = auto_target ? 1 : 2;
+    if (!auto_target) cfg.target = argv[1];
+
+    for (int i = arg_start; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "-p" && i + 1 < argc)             port_str = argv[++i];
-        else if (arg == "-t" && i + 1 < argc)         cfg.timeout_ms = std::stoi(argv[++i]);
-        else if (arg == "--threads" && i + 1 < argc)  cfg.threads = std::stoi(argv[++i]);
-        else if (arg == "--hosts" && i + 1 < argc)    host_threads = std::stoi(argv[++i]);
-        else if (arg == "--banner")                   cfg.grab_banner = true;
+
+        if (arg == "-p") {
+            if (i + 1 >= argc) {
+                std::cerr << "  " << RED << "[!]" << RESET << " -p requires a value\n";
+                return 1;
+            }
+            port_str = argv[++i];
+        }
+        else if (arg == "-t") {
+            if (i + 1 >= argc || !safe_stoi(argv[i + 1], cfg.timeout_ms) || cfg.timeout_ms <= 0) {
+                std::cerr << "  " << RED << "[!]" << RESET << " -t requires a positive integer (ms)\n";
+                return 1;
+            }
+            i++;
+        }
+        else if (arg == "--threads") {
+            if (i + 1 >= argc || !safe_stoi(argv[i + 1], cfg.threads) || cfg.threads <= 0) {
+                std::cerr << "  " << RED << "[!]" << RESET << " --threads requires a positive integer\n";
+                return 1;
+            }
+            i++;
+        }
+        else if (arg == "--hosts") {
+            if (i + 1 >= argc || !safe_stoi(argv[i + 1], host_threads) || host_threads <= 0) {
+                std::cerr << "  " << RED << "[!]" << RESET << " --hosts requires a positive integer\n";
+                return 1;
+            }
+            i++;
+        }
+        else if (arg == "--banner") {
+            cfg.grab_banner = true;
+        }
+        else {
+            std::cerr << "  " << YELLOW << "[?]" << RESET << " Unknown option '" << arg << "', ignoring\n";
+        }
     }
 
     if (port_str.empty()) {
@@ -122,11 +95,29 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (auto_target) {
+        try {
+            cfg.target = detect_local_subnet();
+        }
+        catch (const std::exception& e) {
+            std::cerr << "  " << RED << "[!]" << RESET
+                << " Could not auto-detect local subnet: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     clearScreen();
     printBanner(cfg, ports);
+    if (auto_target)
+        std::cout << "  " << YELLOW << "[i]" << RESET
+        << " No host given -- auto-detected and scanning the local subnet.\n\n";
 
     try {
         auto hosts = parse_cidr(cfg.target);
+        if (hosts.empty()) {
+            std::cerr << "  " << RED << "[!]" << RESET << " No hosts to scan.\n";
+            return 1;
+        }
         std::cout << "  Hosts   : " << hosts.size() << "\n\n";
 
         auto t_start = std::chrono::steady_clock::now();
@@ -139,7 +130,7 @@ int main(int argc, char* argv[]) {
         for (const auto& host : hosts)
             host_queue.push(host);
 
-        int actual_threads = std::min((int)hosts.size(), host_threads);
+        int actual_threads = std::max(1, std::min((int)hosts.size(), host_threads));
         int per_host_threads = std::max(1, cfg.threads / actual_threads);
 
         auto worker = [&]() {
@@ -165,7 +156,10 @@ int main(int argc, char* argv[]) {
                         hits++;
                     }
                 }
-                catch (...) {}
+                catch (...) {
+                    // Host unreachable / unresolvable -- expected for plenty
+                    // of addresses in a subnet scan, so just skip it.
+                }
             }
             };
 

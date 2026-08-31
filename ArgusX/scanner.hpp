@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
-#include <map>
+#include <cstdint>
 
 struct PortResult {
     int         port;
@@ -12,7 +12,7 @@ struct PortResult {
 
 struct ScanConfig {
     std::string target;
-    int         timeout_ms = 100;
+    int         timeout_ms = 400;
     int         threads = 500;
     bool        grab_banner = false;
 };
@@ -32,10 +32,17 @@ private:
     std::string m_ip;   // resolved IP
 
     bool        tcp_connect(int port);
-    std::string grab_banner(int port);
+    std::string grab_banner_data(int port);
     std::string guess_service(int port);
     std::string resolve(const std::string& host);
 };
 
-std::vector<int> parse_ports(const std::string& port_str);
-std::vector<std::string> parse_cidr(const std::string& cidr);
+// ---- CLI / target parsing (platform-independent, in common.cpp) ----
+std::vector<int>          parse_ports(const std::string& port_str);
+std::vector<std::string>  parse_cidr(const std::string& cidr);
+
+// ---- Platform-specific (in scanner_win.cpp / scanner.cpp) ----
+// Detects the machine's primary non-loopback IPv4 interface and returns its
+// network in CIDR form, e.g. "192.168.1.0/24". Throws std::runtime_error if
+// no suitable interface can be found.
+std::string detect_local_subnet();

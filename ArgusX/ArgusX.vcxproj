@@ -127,6 +127,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\..\Downloads\common.cpp" />
+    <ClCompile Include="..\..\..\Downloads\scanner_win.cpp" />
     <ClCompile Include="ArgusX.cpp" />
     <ClCompile Include="scanner.cpp" />
   </ItemGroup>
