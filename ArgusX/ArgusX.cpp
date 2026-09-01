@@ -1,4 +1,4 @@
-#define NOMINMAX
+﻿#define NOMINMAX
 #include "scanner.hpp"
 #include "UI.hpp"
 
@@ -185,3 +185,7 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+// ───────────────────────────────────────────
+//  ◉ ◉ ◉   snadderad
+//  github.com/snadderad
+// ───────────────────────────────────────────
