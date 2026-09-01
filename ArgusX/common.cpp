@@ -66,7 +66,7 @@ std::vector<int> parse_ports(const std::string& port_str) {
 static uint32_t ip_to_u32(const std::string& ip) {
     unsigned int a, b, c, d;
     char extra;
-    if (sscanf(ip.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4)
+    if (sscanf_s(ip.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4)
         throw std::runtime_error("Invalid IPv4 address: " + ip);
     if (a > 255 || b > 255 || c > 255 || d > 255)
         throw std::runtime_error("Invalid IPv4 address: " + ip);

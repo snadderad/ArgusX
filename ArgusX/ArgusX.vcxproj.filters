@@ -21,10 +21,10 @@
     <ClCompile Include="scanner.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\Downloads\scanner_win.cpp">
+    <ClCompile Include="scanner_win.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\Downloads\common.cpp">
+    <ClCompile Include="common.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
