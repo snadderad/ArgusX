@@ -39,8 +39,8 @@ Scanner::Scanner(const ScanConfig& cfg) : m_cfg(cfg) {
 }
 
 std::string Scanner::resolve(const std::string& host) {
-    struct addrinfo hints{}, *res = nullptr;
-    hints.ai_family   = AF_INET;
+    struct addrinfo hints {}, * res = nullptr;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res)
@@ -53,7 +53,9 @@ std::string Scanner::resolve(const std::string& host) {
     return std::string(ip_str);
 }
 
-bool Scanner::tcp_connect(int port) {
+bool Scanner::tcp_connect(int port, int timeout_ms) {
+    if (timeout_ms < 0) timeout_ms = m_cfg.timeout_ms;
+
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) return false;
 
@@ -62,20 +64,21 @@ bool Scanner::tcp_connect(int port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(static_cast<u_short>(port));
+    addr.sin_port = htons(static_cast<u_short>(port));
     inet_pton(AF_INET, m_ip.c_str(), &addr.sin_addr);
 
     bool connected = false;
     int rc = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (rc == 0) {
         connected = true;
-    } else if (WSAGetLastError() == WSAEWOULDBLOCK) {
+    }
+    else if (WSAGetLastError() == WSAEWOULDBLOCK) {
         fd_set write_set;
         FD_ZERO(&write_set);
         FD_SET(sock, &write_set);
         timeval tv{};
-        tv.tv_sec  = m_cfg.timeout_ms / 1000;
-        tv.tv_usec = (m_cfg.timeout_ms % 1000) * 1000;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
 
         int sel = select(0, nullptr, &write_set, nullptr, &tv);
         if (sel > 0 && FD_ISSET(sock, &write_set)) {
@@ -90,6 +93,77 @@ bool Scanner::tcp_connect(int port) {
     return connected;
 }
 
+bool Scanner::probe_alive(int port, int timeout_ms) {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return false;
+
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    inet_pton(AF_INET, m_ip.c_str(), &addr.sin_addr);
+
+    bool responded = false;
+    int rc = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc == 0) {
+        responded = true; // port open -- definitely alive
+    }
+    else {
+        int connect_err = WSAGetLastError();
+        if (connect_err == WSAEWOULDBLOCK) {
+            fd_set write_set;
+            FD_ZERO(&write_set);
+            FD_SET(sock, &write_set);
+            timeval tv{};
+            tv.tv_sec = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+            int sel = select(0, nullptr, &write_set, nullptr, &tv);
+            if (sel > 0 && FD_ISSET(sock, &write_set)) {
+                int err = 0;
+                int len = sizeof(err);
+                getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &len);
+                // err == 0 -> port open. WSAECONNREFUSED -> a RST came back,
+                // so something answered even though this port is closed.
+                // Any other error (host/net unreachable, etc.) means the
+                // attempt never actually reached the target.
+                responded = (err == 0 || err == WSAECONNREFUSED);
+            }
+            // sel == 0 -> pure timeout, no evidence either way.
+        }
+        else if (connect_err == WSAECONNREFUSED) {
+            responded = true;
+        }
+        // Any other immediate error (WSAENETUNREACH, WSAEHOSTUNREACH, ...)
+        // means the attempt never really reached anything -- not evidence
+        // of life.
+    }
+
+    closesocket(sock);
+    return responded;
+}
+
+bool Scanner::is_alive(int timeout_ms) {
+    static const std::vector<int> probe_ports = { 80, 443, 22, 445, 3389 };
+
+    std::atomic<bool> alive(false);
+    std::vector<std::thread> probes;
+    probes.reserve(probe_ports.size());
+
+    for (int p : probe_ports) {
+        probes.emplace_back([this, p, timeout_ms, &alive]() {
+            if (probe_alive(p, timeout_ms))
+                alive.store(true, std::memory_order_relaxed);
+            });
+    }
+    for (auto& t : probes)
+        t.join();
+
+    return alive.load();
+}
+
 std::string Scanner::grab_banner_data(int port) {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) return "";
@@ -100,7 +174,7 @@ std::string Scanner::grab_banner_data(int port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(static_cast<u_short>(port));
+    addr.sin_port = htons(static_cast<u_short>(port));
     inet_pton(AF_INET, m_ip.c_str(), &addr.sin_addr);
 
     if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -134,7 +208,7 @@ std::string Scanner::guess_service(int port) {
     return (it != known.end()) ? it->second : "";
 }
 
-std::vector<PortResult> Scanner::scan(const std::vector<int>& ports) {
+std::vector<PortResult> Scanner::scan(const std::vector<int>& ports, std::atomic<long long>* progress) {
     std::vector<PortResult> results;
     std::vector<std::thread> workers;
     std::mutex results_mutex;
@@ -150,16 +224,18 @@ std::vector<PortResult> Scanner::scan(const std::vector<int>& ports) {
 
             if (tcp_connect(port)) {
                 PortResult r;
-                r.port    = port;
-                r.open    = true;
+                r.port = port;
+                r.open = true;
                 r.service = guess_service(port);
-                r.banner  = m_cfg.grab_banner ? grab_banner_data(port) : "";
+                r.banner = m_cfg.grab_banner ? grab_banner_data(port) : "";
 
                 std::lock_guard<std::mutex> lock(results_mutex);
                 results.push_back(std::move(r));
             }
+
+            if (progress) progress->fetch_add(1, std::memory_order_relaxed);
         }
-    };
+        };
 
     for (int i = 0; i < thread_count; i++)
         workers.emplace_back(worker);
@@ -172,11 +248,11 @@ std::vector<PortResult> Scanner::scan(const std::vector<int>& ports) {
     return results;
 }
 
-std::vector<PortResult> Scanner::scan(int port_start, int port_end) {
+std::vector<PortResult> Scanner::scan(int port_start, int port_end, std::atomic<long long>* progress) {
     std::vector<int> ports;
     for (int p = port_start; p <= port_end; p++)
         ports.push_back(p);
-    return scan(ports);
+    return scan(ports, progress);
 }
 
 std::string detect_local_subnet() {

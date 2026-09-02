@@ -79,6 +79,9 @@ int main(int argc, char* argv[]) {
         else if (arg == "--banner") {
             cfg.grab_banner = true;
         }
+        else if (arg == "--no-ping") {
+            cfg.skip_discovery = true;
+        }
         else {
             std::cerr << "  " << YELLOW << "[?]" << RESET << " Unknown option '" << arg << "', ignoring\n";
         }
@@ -118,7 +121,101 @@ int main(int argc, char* argv[]) {
             std::cerr << "  " << RED << "[!]" << RESET << " No hosts to scan.\n";
             return 1;
         }
-        std::cout << "  Hosts   : " << hosts.size() << "\n\n";
+
+        // --- Host discovery sweep -------------------------------------------------
+        // Only worth doing when there's more than one candidate host (a CIDR
+        // block). A single explicit target is always scanned directly -- the
+        // user asked for that host specifically, discovery would only add
+        // latency there.
+        std::vector<std::string> alive_hosts;
+        bool do_discovery = !cfg.skip_discovery && hosts.size() > 1;
+
+        if (do_discovery) {
+            std::cout << "  " << YELLOW << "[i]" << RESET << " Sweeping " << hosts.size()
+                << " hosts for signs of life before the full scan (use --no-ping to skip)...\n";
+
+            std::mutex disc_queue_mutex;
+            std::mutex alive_mutex;
+            std::queue<std::string> disc_queue;
+            for (const auto& h : hosts) disc_queue.push(h);
+
+            std::atomic<int> checked(0);
+            std::atomic<int> alive_count(0);
+            std::atomic<bool> discovery_done(false);
+
+            // Discovery probes are cheap (short timeout, only a few ports),
+            // so we can afford noticeably more concurrency here than during
+            // the full port scan.
+            int discover_threads = std::max(1, std::min((int)hosts.size(), 64));
+
+            auto t_disc_start = std::chrono::steady_clock::now();
+
+            std::thread progress_thread([&]() {
+                while (!discovery_done.load()) {
+                    double elapsed = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - t_disc_start).count();
+                    printDiscoveryProgress(checked.load(), (int)hosts.size(), alive_count.load(), elapsed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                }
+                });
+
+            auto disc_worker = [&]() {
+                while (true) {
+                    std::string host;
+                    {
+                        std::lock_guard<std::mutex> lock(disc_queue_mutex);
+                        if (disc_queue.empty()) return;
+                        host = disc_queue.front();
+                        disc_queue.pop();
+                    }
+
+                    try {
+                        ScanConfig probe_cfg = cfg;
+                        probe_cfg.target = host;
+                        Scanner scanner(probe_cfg);
+                        if (scanner.is_alive()) {
+                            std::lock_guard<std::mutex> lock(alive_mutex);
+                            alive_hosts.push_back(host);
+                            alive_count++;
+                        }
+                    }
+                    catch (...) {
+                        // Unresolvable -- treat the same as no response, skip it.
+                    }
+                    checked++;
+                }
+                };
+
+            std::vector<std::thread> disc_threads;
+            for (int i = 0; i < discover_threads; i++)
+                disc_threads.emplace_back(disc_worker);
+            for (auto& t : disc_threads)
+                t.join();
+
+            discovery_done = true;
+            progress_thread.join();
+            clearProgressLine();
+
+            double disc_elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t_disc_start).count();
+            std::cout << "  Found " << GREEN << alive_hosts.size() << RESET << " / " << hosts.size()
+                << " hosts alive in " << std::fixed << std::setprecision(2) << disc_elapsed << "s\n\n";
+
+            if (alive_hosts.empty()) {
+                std::cout << "  " << YELLOW << "[i]" << RESET
+                    << " No live hosts found -- nothing to scan.\n";
+                std::cout << "  " << YELLOW << "[i]" << RESET
+                    << " If you expect hosts here, they may be firewalled against the probe\n"
+                    << "      ports -- try again with --no-ping.\n\n";
+                return 0;
+            }
+        }
+        else {
+            alive_hosts = hosts;
+        }
+
+        std::cout << "  Hosts   : " << alive_hosts.size()
+            << (do_discovery ? " (alive, of " + std::to_string(hosts.size()) + " total)" : "") << "\n\n";
 
         auto t_start = std::chrono::steady_clock::now();
 
@@ -127,11 +224,27 @@ int main(int argc, char* argv[]) {
         std::atomic<int> hits(0);
         std::queue<std::string> host_queue;
 
-        for (const auto& host : hosts)
+        for (const auto& host : alive_hosts)
             host_queue.push(host);
 
-        int actual_threads = std::max(1, std::min((int)hosts.size(), host_threads));
+        int actual_threads = std::max(1, std::min((int)alive_hosts.size(), host_threads));
         int per_host_threads = std::max(1, cfg.threads / actual_threads);
+
+        // Live progress indicator for the full scan -- without this, a big
+        // scan (e.g. -p 1-65535 across a /24) prints nothing until the first
+        // hit and looks stalled.
+        long long total_ports = static_cast<long long>(alive_hosts.size()) * static_cast<long long>(ports.size());
+        std::atomic<long long> ports_scanned(0);
+        std::atomic<bool> scan_done(false);
+
+        std::thread progress_thread([&]() {
+            while (!scan_done.load()) {
+                double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - t_start).count();
+                printScanProgress(ports_scanned.load(), total_ports, elapsed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            });
 
         auto worker = [&]() {
             while (true) {
@@ -149,9 +262,10 @@ int main(int argc, char* argv[]) {
 
                 try {
                     Scanner scanner(local_cfg);
-                    auto results = scanner.scan(ports);
+                    auto results = scanner.scan(ports, &ports_scanned);
                     if (!results.empty()) {
                         std::lock_guard<std::mutex> lock(print_mutex);
+                        clearProgressLine(); // don't let a hit get tangled with the progress line
                         displayHit(host, results);
                         hits++;
                     }
@@ -169,6 +283,10 @@ int main(int argc, char* argv[]) {
         for (auto& t : threads)
             t.join();
 
+        scan_done = true;
+        progress_thread.join();
+        clearProgressLine();
+
         auto t_end = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(t_end - t_start).count();
 
@@ -185,7 +303,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-// ───────────────────────────────────────────
-//  ◉ ◉ ◉   snadderad
-//  github.com/snadderad
-// ───────────────────────────────────────────

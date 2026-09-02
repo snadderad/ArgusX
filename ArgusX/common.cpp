@@ -30,23 +30,26 @@ std::vector<int> parse_ports(const std::string& port_str) {
             try {
                 size_t posA, posB;
                 int start = std::stoi(a, &posA);
-                int end   = std::stoi(b, &posB);
+                int end = std::stoi(b, &posB);
                 if (posA != a.size() || posB != b.size()) continue;
                 if (start > end) std::swap(start, end);
                 start = std::max(start, 1);
-                end   = std::min(end, 65535);
+                end = std::min(end, 65535);
                 for (int p = start; p <= end; p++)
                     ports.push_back(p);
-            } catch (...) {
+            }
+            catch (...) {
                 continue; // malformed range, skip
             }
-        } else {
+        }
+        else {
             try {
                 size_t pos;
                 int p = std::stoi(token, &pos);
                 if (pos == token.size() && p >= 1 && p <= 65535)
                     ports.push_back(p);
-            } catch (...) {
+            }
+            catch (...) {
                 continue; // malformed token, skip
             }
         }
@@ -64,19 +67,49 @@ std::vector<int> parse_ports(const std::string& port_str) {
 // host IP (network and broadcast addresses excluded for masks smaller than /31).
 // ---------------------------------------------------------------------------
 static uint32_t ip_to_u32(const std::string& ip) {
-    unsigned int a, b, c, d;
-    char extra;
-    if (sscanf_s(ip.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4)
+    // Manual split-and-parse instead of sscanf_s: sscanf_s is an MSVC-only
+    // "secure" function and won't compile with GCC/Clang, which made this
+    // file (and therefore the whole non-Windows build) fail to compile.
+    // This does the same strict validation -- exactly four numeric octets,
+    // each 0-255, nothing extra -- but portably.
+    std::vector<unsigned int> octets;
+    std::stringstream ss(ip);
+    std::string token;
+
+    while (std::getline(ss, token, '.')) {
+        // Empty token means a leading '.', a doubled ".." or similar.
+        if (token.empty())
+            throw std::runtime_error("Invalid IPv4 address: " + ip);
+
+        try {
+            size_t pos = 0;
+            unsigned long v = std::stoul(token, &pos);
+            if (pos != token.size() || v > 255) // trailing junk or out of range
+                throw std::runtime_error("Invalid IPv4 address: " + ip);
+            octets.push_back(static_cast<unsigned int>(v));
+        }
+        catch (const std::runtime_error&) {
+            throw; // our own "invalid address" error -- let it propagate
+        }
+        catch (...) {
+            // stoul threw (not a number at all, or too large to fit)
+            throw std::runtime_error("Invalid IPv4 address: " + ip);
+        }
+    }
+
+    // A trailing '.' (e.g. "1.2.3.") is naturally caught here too: getline
+    // yields no final empty token in that case, so we just end up with the
+    // wrong count and land in this check anyway.
+    if (octets.size() != 4)
         throw std::runtime_error("Invalid IPv4 address: " + ip);
-    if (a > 255 || b > 255 || c > 255 || d > 255)
-        throw std::runtime_error("Invalid IPv4 address: " + ip);
-    return (a << 24) | (b << 16) | (c << 8) | d;
+
+    return (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
 }
 
 static std::string u32_to_ip(uint32_t ip) {
     std::ostringstream oss;
     oss << ((ip >> 24) & 0xFF) << '.' << ((ip >> 16) & 0xFF) << '.'
-        << ((ip >> 8) & 0xFF)  << '.' << (ip & 0xFF);
+        << ((ip >> 8) & 0xFF) << '.' << (ip & 0xFF);
     return oss.str();
 }
 
@@ -90,7 +123,7 @@ std::vector<std::string> parse_cidr(const std::string& cidr) {
         return hosts;
     }
 
-    std::string ip_part   = cidr.substr(0, slash);
+    std::string ip_part = cidr.substr(0, slash);
     std::string bits_part = cidr.substr(slash + 1);
 
     int prefix;
@@ -98,7 +131,8 @@ std::vector<std::string> parse_cidr(const std::string& cidr) {
         size_t pos;
         prefix = std::stoi(bits_part, &pos);
         if (pos != bits_part.size()) throw std::invalid_argument("");
-    } catch (...) {
+    }
+    catch (...) {
         throw std::runtime_error("Invalid CIDR prefix in: " + cidr);
     }
     if (prefix < 0 || prefix > 32)
@@ -119,7 +153,7 @@ std::vector<std::string> parse_cidr(const std::string& cidr) {
 
     // Exclude network/broadcast addresses for anything smaller than /31.
     uint32_t first = (host_bits <= 1) ? network : network + 1;
-    uint32_t last  = (host_bits <= 1) ? broadcast : broadcast - 1;
+    uint32_t last = (host_bits <= 1) ? broadcast : broadcast - 1;
 
     hosts.reserve(last - first + 1);
     for (uint32_t ip = first; ip <= last; ip++)

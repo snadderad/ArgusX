@@ -17,6 +17,7 @@
 #define RED     "\033[31m"
 #define GREEN   "\033[32m"
 #define YELLOW  "\033[33m"
+#define CYAN    "\033[36m"
 #define RESET   "\033[0m"
 
 inline void enableANSI() {
@@ -90,13 +91,44 @@ inline void line() {
     std::cout << "  ----------------------------------------\n";
 }
 
+// Wipes whatever is currently on the terminal's current line. Call this
+// before printing anything else (like a hit) while a \r-updated progress
+// line might still be sitting there uncleared.
+inline void clearProgressLine() {
+    std::cout << "\r" << std::string(78, ' ') << "\r" << std::flush;
+}
+
+// In-place "scanned X/Y ports (elapsed T s)" line for the main port-scan
+// phase. Meant to be called repeatedly from a dedicated thread while
+// workers are scanning, so a big scan doesn't look stalled with zero
+// output until the first hit.
+inline void printScanProgress(long long done, long long total, double elapsedSec) {
+    double pct = (total > 0) ? (100.0 * static_cast<double>(done) / static_cast<double>(total)) : 0.0;
+    if (pct > 100.0) pct = 100.0; // in-flight ports can push done slightly past total momentarily
+
+    std::cout << "\r  " << CYAN
+        << "Scanning: " << done << "/" << total << " ports"
+        << " (" << std::fixed << std::setprecision(1) << pct << "%)"
+        << "  elapsed " << std::setprecision(1) << elapsedSec << "s"
+        << RESET << "   " << std::flush;
+}
+
+// In-place "discovering hosts: X/Y checked, N alive (elapsed T s)" line for
+// the pre-scan host-discovery sweep.
+inline void printDiscoveryProgress(int checked, int total, int alive, double elapsedSec) {
+    std::cout << "\r  Discovering hosts: " << checked << "/" << total << " checked, "
+        << GREEN << alive << RESET << " alive"
+        << "  elapsed " << std::fixed << std::setprecision(1) << elapsedSec << "s"
+        << "   " << std::flush;
+}
+
 inline void printBanner(const ScanConfig& cfg, const std::vector<int>& ports) {
     std::vector<std::string> ascii = {
         "                :::     :::::::::   ::::::::  :::    :::  ::::::::          :::    :::",
         "             :+: :+:   :+:    :+: :+:    :+: :+:    :+: :+:    :+:         :+:    :+: ",
         "           +:+   +:+  +:+    +:+ +:+        +:+    +:+ +:+                 +:+  +:+   ",
         "         +#++:++#++: +#++:++#:  :#:        +#+    +:+ +#++:++#++           +#++:+     ",
-        "        +#+     +#+ +#+    +#+ +#+  ####         +#+        +#+          +#+  +#+     ",
+        "        +#+     +#+ +#+    +#+ +#+  ####  +#+    +#+        +#+          +#+  +#+     ",
         "       #+#     #+# #+#    #+# #+#    #+  #+#    #+# #+#    #+#         #+#    #+#     ",
         "      ###     ### ###    ###  ########   ########   ########          ###    ###      ",
         "                                                                                      ",
@@ -135,7 +167,10 @@ inline void printUsage(const char* prog) {
     std::cout << "  -t <ms>            timeout per port in ms (default: 400)\n";
     std::cout << "  --threads <n>      port-scanning threads (default: 500)\n";
     std::cout << "  --banner           grab service banners\n";
-    std::cout << "  --hosts <n>        parallel host threads (default: 10)\n\n";
+    std::cout << "  --hosts <n>        parallel host threads (default: 10)\n";
+    std::cout << "  --no-ping          skip the host-discovery sweep, scan every host\n";
+    std::cout << "                     in the range even if it doesn't answer a quick\n";
+    std::cout << "                     liveness probe\n\n";
     std::cout << "Examples:\n";
     std::cout << "  " << prog << " 192.168.1.1 -p 1-1000\n";
     std::cout << "  " << prog << " vigil -p 22,80,443 --banner\n";
